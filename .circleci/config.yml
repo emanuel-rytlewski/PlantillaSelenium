@@ -1,0 +1,96 @@
+Java Gradle CircleCI 2.0 configuration file
+#
+# Check https://circleci.com/docs/2.0/language-java/ for more details
+#
+version: 2.1
+executors:
+  machine-executor:
+    machine:
+      # specify the version you desire here
+      image: ubuntu-2004:202104-01
+
+jobs:
+  build:
+    executor: machine-executor
+    steps:
+      - checkout
+
+      # Download and cache dependencies
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "build.gradle" }}
+            # fallback to using the latest cache if no exact match is found
+            - v1-dependencies-
+
+      - run:
+          name: Install gradle dependencies
+          command: |
+            java -version
+            ./gradlew dependencies
+      - save_cache:
+          paths:
+            - ~/.gradle
+          key: v1-dependencies-{{ checksum "build.gradle" }}
+
+  test:
+    executor: machine-executor
+    steps:
+      - checkout
+
+      # Create Docker Network
+      - run:
+          name: Create Docker Network
+          command: |
+            docker network create grid
+      # download latest chrome/firefox elgalu images
+      - run:
+          name: Download chrome/firefox docker images
+          command: |
+            docker pull elgalu/selenium
+      # start selenium grid and get grid IP address
+      - run:
+          name: Start Zalenium Grid
+          command: |
+            docker run --rm -d --name zalenium --net grid -p 4444:4444 -v /var/run/docker.sock:/var/run/docker.sock -v /tmp/videos:/home/seluser/videos --privileged dosel/zalenium start
+            echo "export IP_ZALENIUM=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' zalenium)" >> $BASH_ENV
+      # wait until zalenium is ready
+      - run:
+          name: Wait until zalenium grid is ready
+          command: |
+            echo $IP_ZALENIUM
+            wget --retry-connrefused --retry-on-http-error=502 -T 60 http://$IP_ZALENIUM:4444/wd/hub/status
+      # run tests!
+      - run:
+          name: Execute tests!
+          command: |
+            echo $IP_ZALENIUM
+            ./gradlew test -DgridURL=http://$IP_ZALENIUM:4444/wd/hub -Denvironment=prod -Ddomain=fr
+      # Wait until all sessions are finished
+      - run:
+          name: Wait until zalenium sessions are all closed
+          when: always
+          command: |
+            ./waitForSessions.sh
+      # Copy videos
+      - run:
+          name: Copy videos to the test report folder
+          when: always
+          command: |
+            cp /tmp/videos/*.mp4 ~/project/build/extent/HtmlReport
+      - store_artifacts:
+          path: ~/project/build/logs
+          destination: logs
+      - store_artifacts:
+          path: ~/project/build/extent
+          destination: extent
+      - store_test_results:
+          path: ~/project/build/reports/tests/test/junitreports
+
+workflows:
+  version: 2
+  build_and_test:
+    jobs:
+      - build
+      - test:
+          requires:
+            - build
